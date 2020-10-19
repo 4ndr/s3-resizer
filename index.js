@@ -1,75 +1,72 @@
 'use strict'
 
-
 const AWS = require('aws-sdk');
 const S3 = new AWS.S3({signatureVersion: 'v4'});
 const Sharp = require('sharp');
-const PathPattern = /(.*\/)?(.*)\/(.*)/;
 
 // parameters
-const {BUCKET, URL} = process.env;
-const WHITELIST = process.env.WHITELIST
-    ? Object.freeze(process.env.WHITELIST.split(' '))
-    : null;
-
+const {ALLOWED_BUCKETS, URL} = process.env;
 
 exports.handler = async (event) => {
-    const path = event.queryStringParameters.path;
-    const parts = PathPattern.exec(path);
-    const dir = parts[1] || '';
-    const resizeOption = parts[2];  // e.g. "150x150_max"
-    const sizeAndAction = resizeOption.split('_');
-    const filename = parts[3];
+    const bucket = event.queryStringParameters.bucket || '';
+    const filename = event.queryStringParameters.fileId || '';
+    const w = event.queryStringParameters.w;
+    const h = event.queryStringParameters.h;
 
-    const sizes = sizeAndAction[0].split("x");
-    const action = sizeAndAction.length > 1 ? sizeAndAction[1] : null;
-
-    // Whitelist validation.
-    if (WHITELIST && !WHITELIST.includes(resizeOption)) {
+    if (bucket === ''){
         return {
             statusCode: 400,
-            body: `WHITELIST is set but does not contain the size parameter "${resizeOption}"`,
+            body: `Bucket is not correctly informed, bucket: "${bucket}"`,
             headers: {"Content-Type": "text/plain"}
-        };
+        }
     }
 
-    // Action validation.
-    if (action && action !== 'max' && action !== 'min') {
+    if (filename === ''){
         return {
             statusCode: 400,
-            body: `Unknown func parameter "${action}"\n` +
-                  'For query ".../150x150_func", "_func" must be either empty, "_min" or "_max"',
+            body: `file-id is not correctly informed, file-id: "${filename}"`,
             headers: {"Content-Type": "text/plain"}
-        };
+        }
+    }
+
+    if (!ALLOWED_BUCKETS.includes(bucket)){
+        return {
+            statusCode: 404,
+            body: `Bucket not found: "${bucket}"`,
+            headers: {"Content-Type": "text/plain"}
+        }
     }
 
     try {
+
+        const width = w === 'AUTO' ? null : parseInt(w);
+        const height = h === 'AUTO' ? null : parseInt(h);
+
+        const path = `${w}x${h}/${filename}`
+
+        const fileExist = await S3
+            .getObject({Bucket: bucket, Key: path})
+            .promise()
+            .then(() => {
+                return {
+                    statusCode: 200,
+                    body: fileExist.Body,
+                    headers: {"Content-Type": fileExist.ContentType}
+                }
+            });
+
         const data = await S3
-            .getObject({Bucket: BUCKET, Key: dir + filename})
+            .getObject({Bucket: bucket, Key: filename})
             .promise();
 
-        const width = sizes[0] === 'AUTO' ? null : parseInt(sizes[0]);
-        const height = sizes[1] === 'AUTO' ? null : parseInt(sizes[1]);
-        let fit;
-        switch (action) {
-            case 'max':
-                fit = 'inside';
-                break;
-            case 'min':
-                fit = 'outside';
-                break;
-            default:
-                fit = 'cover';
-                break;
-        }
         const result = await Sharp(data.Body, {failOnError: false})
-            .resize(width, height, {withoutEnlargement: true, fit})
+            .resize(width, height)
             .rotate()
             .toBuffer();
 
         await S3.putObject({
             Body: result,
-            Bucket: BUCKET,
+            Bucket: bucket,
             ContentType: data.ContentType,
             Key: path,
             CacheControl: 'public, max-age=86400'
